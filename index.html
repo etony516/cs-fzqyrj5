@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="robots" content="noindex, nofollow, noarchive, noimageindex">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>네잎 스캐너 v2.2.1 (내장 모델)</title>
+<title>네잎 스캐너 v2.3.0 (내장 모델)</title>
 <style>
   :root {
     --bg: #F3F6EE; --ink: #16241A; --panel: #FFFFFF; --line: #C8D3BC;
@@ -101,6 +101,9 @@
   #banner[hidden] { display: none; }
   @keyframes bannerPop { from { transform: translateX(-50%) scale(.6); opacity: 0; } to { transform: translateX(-50%) scale(1); opacity: 1; } }
   @media (prefers-reduced-motion: reduce) { #banner { animation: none; } }
+  #viewer .pair { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+  #viewer .pair button { min-height: 44px; font-size: 14px; }
+  #viewer #saveMsg { font-size: 13px; opacity: .85; min-height: 1.2em; text-align: center; }
 </style>
 </head>
 <body>
@@ -118,11 +121,11 @@
     <strong>클로버 밭을 비춰보세요</strong>
     <span>[스캔 시작]으로 카메라를 켜거나, [파일로 시험]으로 사진·영상을 골라 보세요. 후보가 뜨면 가까이서 눈으로 확인해 주세요.</span>
   </div>
-  <div id="banner" hidden>★ 네잎 발견!</div>
+  <div id="banner" hidden>★ 네잎 후보 발견!</div>
   <div id="hud" hidden>
     <span class="chip" id="statFps">0.0 fps</span>
     <span class="chip" id="statThree">세잎 0</span>
-    <span class="chip" id="statFound">네잎 0</span>
+    <span class="chip" id="statFound">네잎 후보 0</span>
   </div>
 </div>
 
@@ -130,7 +133,9 @@
 
 <div id="viewer" hidden>
   <img id="viewerImg" alt="발견한 클로버">
-  <span>이미지를 길게 눌러 저장하세요</span>
+  <span>눈으로 확인해 주세요. 판정이 틀렸다면 아래 버튼으로 사진을 저장해 주세요.</span>
+  <div class="pair"><button id="saveFP">세잎이었어요 (사진 저장)</button><button id="saveTP">진짜 네잎이에요 (사진 저장)</button></div>
+  <span id="saveMsg"></span>
   <button id="viewerClose">닫기</button>
 </div>
 
@@ -336,7 +341,7 @@ function updateTracks(tracks, dets, opts) {
   const wctx = work.getContext('2d', { willReadFrequently: true });
 
   const cfg = { conf: 0.30, tiles: '1x1', minHits: 3, classes: ['clover-4'], target: 0, showTiles: false, verify: true, useCls: true, clsThr: 0.5, beep: true };
-  const st = { drawTimer: null, fileUrl: null, imgTimer: null, cls: null, model: null, S: 640, running: false, stream: null, tracks: [], nextId: 1, fps: 0, found: 0, tileCount: 1, lastTiles: [] };
+  const st = { viewing: null, drawTimer: null, fileUrl: null, imgTimer: null, cls: null, model: null, S: 640, running: false, stream: null, tracks: [], nextId: 1, fps: 0, found: 0, tileCount: 1, lastTiles: [] };
 
   // ---------- 설정 저장/복원 (실패해도 동작) ----------
   function saveCfg() { try { localStorage.setItem('cloverCfg2', JSON.stringify(cfg)); } catch (e) {} }
@@ -502,6 +507,21 @@ function updateTracks(tracks, dets, opts) {
   $('beep').checked = cfg.beep;
   $('beep').addEventListener('change', e => { cfg.beep = e.target.checked; saveCfg(); });
 
+  // ---------- 발견 사진 저장: 판정이 틀린 사진을 모아 다음 학습에 쓰기 위한 기능 ----------
+  function saveFind(kind) {
+    const f = st.viewing;
+    if (!f) return;
+    const d = new Date(), pad = n => String(n).padStart(2, '0');
+    const stamp = d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate()) + '-' + pad(d.getHours()) + pad(d.getMinutes()) + pad(d.getSeconds());
+    const pct = v => (v == null ? 'x' : Math.round(v * 100));
+    const a = document.createElement('a');
+    a.href = f.src; a.download = kind + '_det' + pct(f.det) + '_cls' + pct(f.cls) + '_' + stamp + '.jpg';
+    document.body.appendChild(a); a.click(); a.remove();
+    $('saveMsg').textContent = '사진을 저장했어요. 모은 사진을 Claude 대화에 첨부해 주세요.';
+  }
+  $('saveFP').onclick = () => saveFind('FP3');
+  $('saveTP').onclick = () => saveFind('TP4');
+
   // ---------- 사진·영상 파일로 시험 (카메라 없이 같은 인식 흐름을 돌린다) ----------
   async function startFromFile(file) {
     if (st.running) await setRunning(false);
@@ -630,7 +650,7 @@ function updateTracks(tracks, dets, opts) {
       if (p !== null) t.cls = Math.max(t.cls || 0, p);
       if (hit && (p === null || p >= cfg.clsThr)) {
         t.verified = true; t.vScore = hit.score;
-        addFind(x, y, side);
+        addFind(x, y, side, t);
         buzz(); celebrate();
       } else if (t.vTries >= 3) {
         // 분류기가 3장이라고 계속 판정하면 세잎으로 표시하고, 그 밖의 경우는 숨긴다
@@ -642,10 +662,10 @@ function updateTracks(tracks, dets, opts) {
   // ---------- 발견 기록 ----------
   const finds = [];
   const thumb = document.createElement('canvas');
-  function addFind(x, y, side) {
-    thumb.width = 480; thumb.height = 480;
-    thumb.getContext('2d').drawImage(video, x, y, side, side, 0, 0, 480, 480);
-    finds.unshift(thumb.toDataURL('image/jpeg', 0.85));
+  function addFind(x, y, side, t) {
+    thumb.width = 720; thumb.height = 720;
+    thumb.getContext('2d').drawImage(video, x, y, side, side, 0, 0, 720, 720);
+    finds.unshift({ src: thumb.toDataURL('image/jpeg', 0.9), det: t ? t.vScore : null, cls: t ? t.cls : null });
     if (finds.length > 12) finds.pop();
     renderStrip();
   }
@@ -655,9 +675,10 @@ function updateTracks(tracks, dets, opts) {
     el.innerHTML = '';
     if (!finds.length) return;
     const cap = document.createElement('span'); cap.className = 'cap'; cap.textContent = '발견 ' + finds.length; el.appendChild(cap);
-    finds.forEach(src => {
+    finds.forEach(f => {
+      const src = f.src;
       const im = document.createElement('img'); im.src = src; im.alt = '발견한 클로버';
-      im.onclick = () => { $('viewerImg').src = src; $('viewer').hidden = false; };
+      im.onclick = () => { st.viewing = f; $('saveMsg').textContent = ''; $('viewerImg').src = src; $('viewer').hidden = false; };
       el.appendChild(im);
     });
     const clr = document.createElement('button'); clr.textContent = '기록 지우기';
@@ -684,7 +705,7 @@ function updateTracks(tracks, dets, opts) {
       st.lastTiles.forEach(t => { ctx.strokeRect(t.x * k, t.y * k, t.w * k, t.h * k); });
       ctx.restore();
     }
-    const label = '네잎';
+    const label = '네잎 후보';
     const now = performance.now();
     let fours = 0, threes = 0;
     ctx.textBaseline = 'middle';
@@ -726,7 +747,7 @@ function updateTracks(tracks, dets, opts) {
         rr(x, y, bw, bh, 8 * dpr); ctx.stroke(); ctx.restore();
       }
     }
-    $('statFound').textContent = '네잎 ' + fours;
+    $('statFound').textContent = '네잎 후보 ' + fours;
     $('statFound').classList.toggle('hit', fours > 0);
     $('statThree').textContent = '세잎 ' + threes;
     $('statFps').textContent = st.fps.toFixed(1) + ' fps · 타일 ' + st.tileCount;
