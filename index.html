@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="robots" content="noindex, nofollow, noarchive, noimageindex">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>네잎 스캐너 v2.0.0 (내장 모델)</title>
+<title>네잎 스캐너 v2.1.0 (내장 모델)</title>
 <style>
   :root {
     --bg: #F3F6EE; --ink: #16241A; --panel: #FFFFFF; --line: #C8D3BC;
@@ -58,7 +58,7 @@
   button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px solid var(--hit); outline-offset: 2px; }
   #go { flex: 1; background: var(--moss); color: var(--on-moss); font-weight: 700; font-size: 16px; }
   #go.stop { background: var(--hit); color: #fff; }
-  #openSettings { background: var(--panel); color: var(--ink); border: 1px solid var(--line); }
+  #openSettings, #openFile { background: var(--panel); color: var(--ink); border: 1px solid var(--line); }
 
   #sheet {
     position: fixed; left: 0; right: 0; bottom: 0; max-height: 82%; overflow-y: auto; z-index: 10;
@@ -108,7 +108,7 @@
   </div>
   <div id="empty">
     <strong>클로버 밭을 비춰보세요</strong>
-    <span>먼저 설정에서 모델을 불러온 뒤 스캔을 시작하세요. 후보가 뜨면 가까이서 눈으로 확인해 주세요.</span>
+    <span>[스캔 시작]으로 카메라를 켜거나, [파일로 시험]으로 사진·영상을 골라 보세요. 후보가 뜨면 가까이서 눈으로 확인해 주세요.</span>
   </div>
   <div id="hud" hidden>
     <span class="chip" id="statFps">0.0 fps</span>
@@ -126,6 +126,8 @@
 
 <div id="dock">
   <button id="go">스캔 시작</button>
+  <button id="openFile">파일로 시험</button>
+  <input id="testFile" type="file" accept="image/*,video/*" hidden>
   <button id="openSettings">설정</button>
 </div>
 
@@ -318,7 +320,7 @@ function updateTracks(tracks, dets, opts) {
   const wctx = work.getContext('2d', { willReadFrequently: true });
 
   const cfg = { conf: 0.30, tiles: '2x2', minHits: 3, classes: ['clover-4'], target: 0, showTiles: false, verify: true, useCls: true, clsThr: 0.5 };
-  const st = { cls: null, model: null, S: 640, running: false, stream: null, tracks: [], nextId: 1, fps: 0, found: 0, tileCount: 1, lastTiles: [] };
+  const st = { fileUrl: null, imgTimer: null, cls: null, model: null, S: 640, running: false, stream: null, tracks: [], nextId: 1, fps: 0, found: 0, tileCount: 1, lastTiles: [] };
 
   // ---------- 설정 저장/복원 (실패해도 동작) ----------
   function saveCfg() { try { localStorage.setItem('cloverCfg2', JSON.stringify(cfg)); } catch (e) {} }
@@ -456,6 +458,39 @@ function updateTracks(tracks, dets, opts) {
     return d[1];  // 클래스 순서: [clover3, clover4]
   }
 
+  // ---------- 사진·영상 파일로 시험 (카메라 없이 같은 인식 흐름을 돌린다) ----------
+  async function startFromFile(file) {
+    if (st.running) await setRunning(false);
+    $('err').textContent = '';
+    try {
+      if (file.type.startsWith('image/')) {
+        const bmp = await createImageBitmap(file);
+        const k = Math.min(1, 1920 / Math.max(bmp.width, bmp.height));
+        const cv = document.createElement('canvas');
+        cv.width = Math.round(bmp.width * k); cv.height = Math.round(bmp.height * k);
+        const c2 = cv.getContext('2d');
+        const redraw = () => c2.drawImage(bmp, 0, 0, cv.width, cv.height);
+        redraw();
+        if (!cv.captureStream) throw new Error('이 브라우저는 사진 시험을 지원하지 않아요. 영상 파일로 해 보세요.');
+        video.srcObject = cv.captureStream(5);
+        st.imgTimer = setInterval(redraw, 200);  // 같은 사진을 계속 내보내 영상처럼 처리한다
+      } else {
+        st.fileUrl = URL.createObjectURL(file);
+        video.srcObject = null; video.src = st.fileUrl; video.loop = true;
+      }
+      video.muted = true; video.playsInline = true;
+      await video.play();
+      fit();
+    } catch (err) {
+      stopCamera();
+      $('err').textContent = '파일을 열지 못했어요. (' + (err.message || err) + ')';
+      openSheet(true); return;
+    }
+    await setRunning(true, true);
+  }
+  $('openFile').onclick = () => $('testFile').click();
+  $('testFile').addEventListener('change', e => { const f = e.target.files[0]; e.target.value = ''; if (f) startFromFile(f); });
+
   // ---------- 화면 맞춤 ----------
   function fit() {
     const vw = video.videoWidth || 16, vh = video.videoHeight || 9;
@@ -484,6 +519,9 @@ function updateTracks(tracks, dets, opts) {
   function stopCamera() {
     if (st.stream) st.stream.getTracks().forEach(t => t.stop());
     st.stream = null; video.srcObject = null;
+    if (st.fileUrl) { URL.revokeObjectURL(st.fileUrl); st.fileUrl = null; }
+    if (st.imgTimer) { clearInterval(st.imgTimer); st.imgTimer = null; }
+    video.removeAttribute('src'); video.loop = false;
   }
 
   // ---------- 추론 ----------
@@ -650,11 +688,11 @@ function updateTracks(tracks, dets, opts) {
     requestAnimationFrame(loop);
   }
 
-  async function setRunning(on) {
+  async function setRunning(on, fromFile) {
     const btn = $('go');
     if (on) {
       $('err').textContent = '';
-      try { await startCamera(); }
+      try { if (!fromFile) await startCamera(); }
       catch (err) {
         const denied = err && (err.name === 'NotAllowedError' || err.name === 'SecurityError');
         $('err').textContent = denied
