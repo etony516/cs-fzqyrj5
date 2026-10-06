@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="robots" content="noindex, nofollow, noarchive, noimageindex">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>네잎 스캐너 v2.1.0 (내장 모델)</title>
+<title>네잎 스캐너 v2.2.1 (내장 모델)</title>
 <style>
   :root {
     --bg: #F3F6EE; --ink: #16241A; --panel: #FFFFFF; --line: #C8D3BC;
@@ -93,6 +93,14 @@
   .danger { background: var(--bg); color: var(--ink); border: 1px solid var(--line); width: 100%; }
   #scrim { position: fixed; inset: 0; background: rgba(0,0,0,.4); z-index: 9; display: none; }
   #scrim.open { display: block; }
+  #banner {
+    position: absolute; left: 50%; top: 52px; transform: translateX(-50%); z-index: 4; white-space: nowrap;
+    background: var(--hit); color: #fff; font-weight: 800; font-size: 20px; padding: 10px 20px; border-radius: 999px;
+    box-shadow: 0 0 0 4px rgba(255,255,255,.4), 0 8px 24px rgba(0,0,0,.4); animation: bannerPop .35s ease-out;
+  }
+  #banner[hidden] { display: none; }
+  @keyframes bannerPop { from { transform: translateX(-50%) scale(.6); opacity: 0; } to { transform: translateX(-50%) scale(1); opacity: 1; } }
+  @media (prefers-reduced-motion: reduce) { #banner { animation: none; } }
 </style>
 </head>
 <body>
@@ -110,9 +118,11 @@
     <strong>클로버 밭을 비춰보세요</strong>
     <span>[스캔 시작]으로 카메라를 켜거나, [파일로 시험]으로 사진·영상을 골라 보세요. 후보가 뜨면 가까이서 눈으로 확인해 주세요.</span>
   </div>
+  <div id="banner" hidden>★ 네잎 발견!</div>
   <div id="hud" hidden>
     <span class="chip" id="statFps">0.0 fps</span>
-    <span class="chip" id="statFound">후보 0</span>
+    <span class="chip" id="statThree">세잎 0</span>
+    <span class="chip" id="statFound">네잎 0</span>
   </div>
 </div>
 
@@ -163,10 +173,10 @@
   <div class="row">
     <label for="tiles">스캔 범위</label>
     <select id="tiles">
-      <option value="1x1">화면 전체 한 번 (빠름)</option>
-      <option value="2x1">가로 2칸</option>
-      <option value="2x2">2×2 타일</option>
-      <option value="3x2">3×2 타일 (느리지만 작은 잎까지)</option>
+      <option value="1x1">가까이: 화면 전체 한 번 (빠름)</option>
+      <option value="2x1">가로로 넓게: 전체 + 가로 2칸</option>
+      <option value="2x2">멀리: 전체 + 2×2 타일</option>
+      <option value="3x2">아주 멀리: 전체 + 3×2 타일 (느림)</option>
     </select>
     <small>넓게 찍을수록 타일을 늘려야 작은 클로버를 놓치지 않아요.</small>
   </div>
@@ -187,6 +197,12 @@
   <div class="row">
     <label for="showTiles" style="display:flex;justify-content:flex-start;gap:8px;align-items:center">
       <input id="showTiles" type="checkbox"> 타일 경계 보기
+    </label>
+  </div>
+
+  <div class="row">
+    <label for="beep" style="display:flex;justify-content:flex-start;gap:8px;align-items:center">
+      <input id="beep" type="checkbox" checked> 네잎 발견 소리
     </label>
   </div>
 
@@ -319,8 +335,8 @@ function updateTracks(tracks, dets, opts) {
   const work = document.createElement('canvas');
   const wctx = work.getContext('2d', { willReadFrequently: true });
 
-  const cfg = { conf: 0.30, tiles: '2x2', minHits: 3, classes: ['clover-4'], target: 0, showTiles: false, verify: true, useCls: true, clsThr: 0.5 };
-  const st = { fileUrl: null, imgTimer: null, cls: null, model: null, S: 640, running: false, stream: null, tracks: [], nextId: 1, fps: 0, found: 0, tileCount: 1, lastTiles: [] };
+  const cfg = { conf: 0.30, tiles: '1x1', minHits: 3, classes: ['clover-4'], target: 0, showTiles: false, verify: true, useCls: true, clsThr: 0.5, beep: true };
+  const st = { drawTimer: null, fileUrl: null, imgTimer: null, cls: null, model: null, S: 640, running: false, stream: null, tracks: [], nextId: 1, fps: 0, found: 0, tileCount: 1, lastTiles: [] };
 
   // ---------- 설정 저장/복원 (실패해도 동작) ----------
   function saveCfg() { try { localStorage.setItem('cloverCfg2', JSON.stringify(cfg)); } catch (e) {} }
@@ -458,6 +474,34 @@ function updateTracks(tracks, dets, opts) {
     return d[1];  // 클래스 순서: [clover3, clover4]
   }
 
+  // ---------- 네잎 발견 알림: 큰 배너 + 소리 ----------
+  let audioCtx = null, bannerTimer = null;
+  function beep() {
+    if (!cfg.beep) return;
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    audioCtx = audioCtx || new AC();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    const t0 = audioCtx.currentTime;
+    [880, 1320].forEach((f, i) => {
+      const s = t0 + i * 0.13, o = audioCtx.createOscillator(), g = audioCtx.createGain();
+      o.type = 'sine'; o.frequency.value = f; o.connect(g); g.connect(audioCtx.destination);
+      g.gain.setValueAtTime(0.0001, s);
+      g.gain.exponentialRampToValueAtTime(0.25, s + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, s + 0.12);
+      o.start(s); o.stop(s + 0.14);
+    });
+  }
+  function celebrate() {
+    const b = $('banner');
+    b.hidden = false;
+    clearTimeout(bannerTimer);
+    bannerTimer = setTimeout(() => { b.hidden = true; }, 2600);
+    beep();
+  }
+  $('beep').checked = cfg.beep;
+  $('beep').addEventListener('change', e => { cfg.beep = e.target.checked; saveCfg(); });
+
   // ---------- 사진·영상 파일로 시험 (카메라 없이 같은 인식 흐름을 돌린다) ----------
   async function startFromFile(file) {
     if (st.running) await setRunning(false);
@@ -546,7 +590,8 @@ function updateTracks(tracks, dets, opts) {
 
   async function detectFrame() {
     const [c, r] = cfg.tiles.split('x').map(Number);
-    const tiles = makeTiles(video.videoWidth, video.videoHeight, c, r, 0.15);
+    const tiles = makeTiles(video.videoWidth, video.videoHeight, c, r, 0.25);
+    if (tiles.length > 1) tiles.unshift({ x: 0, y: 0, w: video.videoWidth, h: video.videoHeight });
     st.lastTiles = tiles; st.tileCount = tiles.length;
     let all = [];
     for (const t of tiles) {
@@ -565,7 +610,7 @@ function updateTracks(tracks, dets, opts) {
   // 정밀 재검사: 확정된 후보 주변을 확대해서 모델을 한 번 더 돌린다
   async function verifyOne() {
     const now = performance.now();
-    const t = st.tracks.find(k => k.hits >= cfg.minHits && !k.verified && !k.rejected && !k.verifying && (!k.vAt || now - k.vAt > 600));
+    const t = st.tracks.find(k => k.hits >= cfg.minHits && !k.verified && !k.rejected && !k.three && !k.verifying && (!k.vAt || now - k.vAt > 600));
     if (!t) return;
     t.verifying = true; t.vAt = now; t.vTries = (t.vTries || 0) + 1;
     try {
@@ -581,18 +626,15 @@ function updateTracks(tracks, dets, opts) {
         const dx = (d.x1 + d.x2) / 2, dy = (d.y1 + d.y2) / 2;
         return Math.abs(dx - cx) < bw * 0.7 && Math.abs(dy - cy) < bh * 0.7;
       }).sort((a, b) => b.score - a.score)[0];
-      if (hit) {
-        const p = cfg.useCls ? await classifyBox(t) : null;
-        if (p !== null) t.cls = Math.max(t.cls || 0, p);
-        if (p === null || p >= cfg.clsThr) {
-          t.verified = true; t.vScore = hit.score;
-          addFind(x, y, side);
-          buzz();
-        } else if (t.vTries >= 3) {
-          t.rejected = true;
-        }
+      const p = cfg.useCls ? await classifyBox(t) : null;
+      if (p !== null) t.cls = Math.max(t.cls || 0, p);
+      if (hit && (p === null || p >= cfg.clsThr)) {
+        t.verified = true; t.vScore = hit.score;
+        addFind(x, y, side);
+        buzz(); celebrate();
       } else if (t.vTries >= 3) {
-        t.rejected = true;
+        // 분류기가 3장이라고 계속 판정하면 세잎으로 표시하고, 그 밖의 경우는 숨긴다
+        if (p !== null && t.cls < cfg.clsThr) t.three = true; else t.rejected = true;
       }
     } finally { t.verifying = false; }
   }
@@ -642,30 +684,51 @@ function updateTracks(tracks, dets, opts) {
       st.lastTiles.forEach(t => { ctx.strokeRect(t.x * k, t.y * k, t.w * k, t.h * k); });
       ctx.restore();
     }
-    const label = cfg.classes[cfg.target] || '후보';
-    let visible = 0;
+    const label = '네잎';
+    const now = performance.now();
+    let fours = 0, threes = 0;
+    ctx.textBaseline = 'middle';
     for (const t of st.tracks) {
       if (t.rejected) continue;
       const x = t.x1 * k, y = t.y1 * k, bw = (t.x2 - t.x1) * k, bh = (t.y2 - t.y1) * k;
       const confirmed = t.hits >= cfg.minHits;
-      if (confirmed) {
-        const ok = !cfg.verify || t.verified;
-        if (ok) visible++;
-        const col = ok ? hitColor : '#FFB020';
-        ctx.lineWidth = (ok ? 3 : 2) * dpr; ctx.strokeStyle = col; rr(x, y, bw, bh, 8 * dpr); ctx.stroke();
-        const txt = ok ? (label + ' ' + Math.round((t.vScore || t.score) * 100) + '%' + (t.verified ? ' ✓' + (t.cls != null ? ' · 잎 ' + Math.round(t.cls * 100) + '%' : '') : '')) : '확인 중…' + (t.cls != null ? ' · 잎 ' + Math.round(t.cls * 100) + '%' : '');
-        ctx.font = '600 ' + (13 * dpr) + 'px system-ui, sans-serif';
-        const tw = ctx.measureText(txt).width + 12 * dpr, th = 22 * dpr;
-        const ty = y - th - 2 * dpr >= 0 ? y - th - 2 * dpr : y + bh + 2 * dpr;
-        ctx.fillStyle = col; ctx.fillRect(x, ty, tw, th);
-        ctx.fillStyle = ok ? '#fff' : '#201400'; ctx.textBaseline = 'middle'; ctx.fillText(txt, x + 6 * dpr, ty + th / 2);
+      const pill = (txt, col, fg, size) => {
+        ctx.font = '700 ' + (size * dpr) + 'px system-ui, sans-serif';
+        const tw = ctx.measureText(txt).width + 14 * dpr, th = (size + 10) * dpr;
+        const ty = y - th - 3 * dpr >= 0 ? y - th - 3 * dpr : y + bh + 3 * dpr;
+        const px = Math.max(0, Math.min(x, w - tw));  // 화면 가장자리에서 라벨이 잘리지 않게
+        ctx.fillStyle = col; ctx.fillRect(px, ty, tw, th);
+        ctx.fillStyle = fg; ctx.fillText(txt, px + 7 * dpr, ty + th / 2);
+      };
+      if (confirmed && t.three) {
+        // 잎이 3장으로 판정된 후보: 얇고 조용하게
+        threes++;
+        ctx.save(); ctx.globalAlpha = 0.9; ctx.lineWidth = 1.5 * dpr; ctx.strokeStyle = '#5BD99A';
+        rr(x, y, bw, bh, 8 * dpr); ctx.stroke();
+        ctx.font = '600 ' + (11 * dpr) + 'px system-ui, sans-serif'; ctx.fillStyle = '#5BD99A';
+        ctx.shadowColor = 'rgba(0,0,0,.9)'; ctx.shadowBlur = 3 * dpr;
+        ctx.fillText('세잎 ' + Math.round((1 - (t.cls || 0)) * 100) + '%', x + 2 * dpr, y > 12 * dpr ? y - 7 * dpr : y + bh + 8 * dpr);
+        ctx.restore();
+      } else if (confirmed && (!cfg.verify || t.verified)) {
+        // 네잎: 굵은 박스 + 바깥으로 퍼지는 링 + 큰 라벨
+        fours++;
+        const ph = (now % 1000) / 1000, grow = ph * 20 * dpr;
+        ctx.save(); ctx.strokeStyle = hitColor; ctx.globalAlpha = 1 - ph; ctx.lineWidth = 3 * dpr;
+        rr(x - grow, y - grow, bw + 2 * grow, bh + 2 * grow, (8 + ph * 12) * dpr); ctx.stroke(); ctx.restore();
+        ctx.save(); ctx.shadowColor = hitColor; ctx.shadowBlur = 16 * dpr; ctx.strokeStyle = hitColor; ctx.lineWidth = 5 * dpr;
+        rr(x, y, bw, bh, 8 * dpr); ctx.stroke(); ctx.restore();
+        pill('★ ' + label + ' ' + Math.round((t.vScore || t.score) * 100) + '%' + (t.verified ? ' ✓' + (t.cls != null ? ' · 잎 ' + Math.round(t.cls * 100) + '%' : '') : ''), hitColor, '#fff', 15);
+      } else if (confirmed) {
+        ctx.lineWidth = 2 * dpr; ctx.strokeStyle = '#FFB020'; rr(x, y, bw, bh, 8 * dpr); ctx.stroke();
+        pill('확인 중…' + (t.cls != null ? ' · 잎 ' + Math.round(t.cls * 100) + '%' : ''), '#FFB020', '#201400', 13);
       } else if (t.hits >= 1) {
         ctx.save(); ctx.lineWidth = 1.5 * dpr; ctx.strokeStyle = 'rgba(255,255,255,.75)'; ctx.setLineDash([5 * dpr, 4 * dpr]);
         rr(x, y, bw, bh, 8 * dpr); ctx.stroke(); ctx.restore();
       }
     }
-    $('statFound').textContent = '후보 ' + visible;
-    $('statFound').classList.toggle('hit', visible > 0);
+    $('statFound').textContent = '네잎 ' + fours;
+    $('statFound').classList.toggle('hit', fours > 0);
+    $('statThree').textContent = '세잎 ' + threes;
     $('statFps').textContent = st.fps.toFixed(1) + ' fps · 타일 ' + st.tileCount;
   }
 
@@ -701,13 +764,14 @@ function updateTracks(tracks, dets, opts) {
         openSheet(true); return;
       }
       st.running = true; st.tracks = []; st.found = 0; st.fps = 0;
+      st.drawTimer = setInterval(draw, 80);  // 검출이 느려도 표시 애니메이션은 부드럽게
       try { if (navigator.wakeLock) st.wake = await navigator.wakeLock.request('screen'); } catch (e) {}
       btn.textContent = '정지'; btn.classList.add('stop');
       $('empty').hidden = true; $('hud').hidden = false;
       if (!st.model) { $('err').textContent = '모델이 없어서 카메라만 켜졌어요. 설정에서 모델을 불러오세요.'; }
       loop();
     } else {
-      st.running = false; stopCamera();
+      st.running = false; clearInterval(st.drawTimer); stopCamera();
       try { if (st.wake) { await st.wake.release(); st.wake = null; } } catch (e) {}
       btn.textContent = '스캔 시작'; btn.classList.remove('stop');
       ctx.clearRect(0, 0, cv.width, cv.height);
